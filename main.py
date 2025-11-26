@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 
 import aiohttp
@@ -21,6 +22,19 @@ class SDGenerator(Star):
         self.active_tasks = 0
         self.max_concurrent_tasks = config.get("max_concurrent_tasks", 10)  # 设定最大并发数
         self.task_semaphore = asyncio.Semaphore(self.max_concurrent_tasks)
+
+    @staticmethod
+    def _select_prompt_option(group: dict, index_key: str, prefix: str, count: int = 4) -> str:
+        """Select prompt by index with safe fallback."""
+        index = group.get(index_key, 0)
+        if not isinstance(index, int) or index < 0 or index >= count:
+            index = 0
+        return group.get(f"{prefix}{index}", "")
+
+    @staticmethod
+    def _compose_prompt(*segments: str) -> str:
+        """Join non-empty prompt segments with commas."""
+        return ",".join(segment for segment in segments if segment)
 
     def _validate_config(self):
         """配置验证"""
@@ -97,32 +111,29 @@ class SDGenerator(Star):
         """获取可用的上采样算法列表"""
         return await self._fetch_webui_resource("upscaler")
 
+    def _build_negative_prompt(self) -> str:
+        """Assemble negative prompt from global and user presets."""
+        global_group = self.config.get("global_prompt_group", {})
+        user_negative_group = self.config["user_prompt_group"]["user_negative_prompt_group"]
+
+        global_negative_prompt = (
+            global_group.get("global_negative_prompt", "")
+            if global_group.get("global_negative_prompt_switch", False)
+            else ""
+        )
+        user_negative_prompt = self._select_prompt_option(
+            user_negative_group, "user_negative_prompt_list", "user_negative_prompt"
+        )
+        return self._compose_prompt(global_negative_prompt, user_negative_prompt)
+
     async def _generate_payload(self, prompt: str) -> dict:
         """构建生成参数"""
         params = self.config["default_params"]
-
-        global_negative_prompt_switch = self.config.get("global_prompt_group").get("global_negative_prompt_switch", False)  # 获取全局负面提示词开关状态
-        nprompt = self.config["user_prompt_group"]["user_negative_prompt_group"]["user_negative_prompt_list"]  # 获取生效的用户预设负面提示词序号
-
-
-
-        if global_negative_prompt_switch:
-             global_negative_prompt = self.config.get("global_prompt_group").get("global_negative_prompt", "")
-        else:
-             global_negative_prompt = ""
-
-        if nprompt == 1: # 生效的用户预设负面提示词
-            user_negative_prompt = self.config["user_prompt_group"]["user_negative_prompt_group"]["user_negative_prompt1"]
-        elif nprompt == 2:
-            user_negative_prompt = self.config["user_prompt_group"]["user_negative_prompt_group"]["user_negative_prompt2"]
-        elif nprompt == 3:
-            user_negative_prompt = self.config["user_prompt_group"]["user_negative_prompt_group"]["user_negative_prompt3"]
-        else:
-            user_negative_prompt = self.config["user_prompt_group"]["user_negative_prompt_group"]["user_negative_prompt0"] 
+        negative_prompt = self._build_negative_prompt()
 
         return {
             "prompt": prompt,
-            "negative_prompt": global_negative_prompt + "," + user_negative_prompt,
+            "negative_prompt": negative_prompt,
             "width": params["width"],
             "height": params["height"],
             "steps": params["steps"],
@@ -138,9 +149,29 @@ class SDGenerator(Star):
         """
         replace_space = self.config.get("replace_space")
         return prompt.replace(replace_space, " ")
-    
 
+    def _build_positive_prompt(self, raw_prompt: str, generated_prompt: str) -> str:
+        """Construct final positive prompt with global/user presets."""
+        global_group = self.config.get("global_prompt_group", {})
+        user_positive_group = self.config["user_prompt_group"]["user_positive_prompt_group"]
 
+        global_positive_prompt = (
+            global_group.get("global_positive_prompt", "")
+            if global_group.get("global_positive_prompt_switch", False)
+            else ""
+        )
+        add_global_first = global_group.get("positive_prompt_add_in_head_or_tail_switch", False)
+        user_positive_prompt = self._select_prompt_option(
+            user_positive_group, "user_positive_prompt_list", "user_positive_prompt"
+        )
+
+        base_prompt = (
+            generated_prompt if self.config.get("enable_generate_prompt") and generated_prompt else self._trans_prompt(raw_prompt)
+        )
+
+        if add_global_first:
+            return self._compose_prompt(global_positive_prompt, user_positive_prompt, base_prompt)
+        return self._compose_prompt(base_prompt, global_positive_prompt, user_positive_prompt)
 
     async def _generate_prompt(self, prompt: str) -> str:
         provider = self.context.get_using_provider()
@@ -324,43 +355,12 @@ class SDGenerator(Star):
                     yield event.plain_result("🖌️ 生成图像阶段，这可能需要一段时间...")
 
                 # 生成正面提示词，决定到底是使用LLM生成还是用户直接提供
-
-                global_positive_prompt_switch = self.config.get("global_prompt_group").get("global_positive_prompt_switch", False)  # 获取全局正面提示词开关状态
-                positive_prompt_add_in_head_or_tail_switch = self.config.get("global_prompt_group").get("positive_prompt_add_in_head_or_tail_switch",False) # 获取正面提示词添加位置
-                pprompt = self.config["user_prompt_group"]["user_positive_prompt_group"]["user_positive_prompt_list"]  # 获取生效的用户预设正面提示词序号
-
-                if global_positive_prompt_switch:
-                    global_positive_prompt = self.config.get("global_prompt_group").get("global_positive_prompt", "")   #判断是否启用全局正面提示词，并获得全局正面提示词
-                else:
-                    global_positive_prompt = ""
-
-                if pprompt == 1:    # 生效的用户正面预设提示词
-                    user_positive_prompt = self.config["user_prompt_group"]["user_positive_prompt_group"]["user_positive_prompt1"]
-                elif pprompt == 2:
-                    user_positive_prompt = self.config["user_prompt_group"]["user_positive_prompt_group"]["user_positive_prompt2"]
-                elif pprompt == 3:
-                    user_positive_prompt = self.config["user_prompt_group"]["user_positive_prompt_group"]["user_positive_prompt3"]
-                else:
-                    user_positive_prompt = self.config["user_prompt_group"]["user_positive_prompt_group"]["user_positive_prompt0"]
-                    
-                
-                
-                if self.config.get("enable_generate_prompt"):   # 检查是否启用用LLM生成提示词
+                generated_prompt = ""
+                if self.config.get("enable_generate_prompt"):
                     generated_prompt = await self._generate_prompt(prompt)
                     logger.debug(f"LLM generated prompt: {generated_prompt}")
-                    
-                    if positive_prompt_add_in_head_or_tail_switch: 
-                        positive_prompt = global_positive_prompt + "," + user_positive_prompt + generated_prompt
-                    
-                    else:
-                        positive_prompt = generated_prompt + "," + global_positive_prompt + "," + user_positive_prompt
-                else:   
-                # 使用用户提供的提示词    
-                    if positive_prompt_add_in_head_or_tail_switch:
-                        positive_prompt = global_positive_prompt + "," + user_positive_prompt + "," + self._trans_prompt(prompt)
-                    else:
-                        positive_prompt = self._trans_prompt(prompt) + "," + global_positive_prompt + "," + user_positive_prompt
-                    
+
+                positive_prompt = self._build_positive_prompt(prompt, generated_prompt)
 
                 #输出正面提示词
                 if self.config.get("enable_show_positive_prompt", False):
@@ -915,7 +915,7 @@ class SDGenerator(Star):
             yield event.plain_result(f"获取 Embedding 模型列表失败: {str(e)}")
 
     @llm_tool("generate_image") # LLM可调用的图像生成工具函数
-    async def generate_image(self, event: AstrMessageEvent, prompt: str):
+    async def generate_image_tool(self, event: AstrMessageEvent, prompt: str):
         """Generate images using Stable Diffusion based on the given prompt.
         This function should only be called when the prompt contains keywords like "generate," "draw," or "create."
         It should not be mistakenly used for image searching.
