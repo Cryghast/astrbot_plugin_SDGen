@@ -9,7 +9,7 @@ from astrbot.api.all import *
 
 TEMP_PATH = os.path.abspath("data/temp")
 
-@register("SDGen", "buding(AstrBot)", "Stable Diffusion图像生成器", "1.2.0")
+@register("SDGen", "buding(AstrBot)", "Stable Diffusion图像生成器", "1.2.1")
 class SDGenerator(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -144,11 +144,26 @@ class SDGenerator(Star):
         }
 
     def _trans_prompt(self, prompt: str) -> str:
-        """
-        将提示词中的“用于替代空格的字符”替换为为空格
-        """
-        replace_space = self.config.get("replace_space")
-        return prompt.replace(replace_space, " ")
+        """返回原始提示词（保留空格）"""
+        return prompt
+
+    @staticmethod
+    def _extract_prompt_from_message(event: AstrMessageEvent, raw_prompt: str) -> str:
+        """从原始消息还原提示词，避免参数解析截断空格"""
+        full = (event.message_str or "").strip()
+        base = (raw_prompt or "").strip()
+
+        if not full:
+            return base
+
+        tokens = full.split()
+        if tokens and tokens[0].lstrip("/") in ("sd",):
+            tokens = tokens[1:]
+        if tokens and tokens[0] == "gen":
+            tokens = tokens[1:]
+
+        fallback = " ".join(tokens).strip()
+        return fallback or base
 
     def _build_positive_prompt(self, raw_prompt: str, generated_prompt: str) -> str:
         """Construct final positive prompt with global/user presets."""
@@ -345,6 +360,10 @@ class SDGenerator(Star):
         async with self.task_semaphore:
             self.active_tasks += 1
             try:
+                prompt = self._extract_prompt_from_message(event, prompt)
+                if not prompt:
+                    yield event.plain_result("⚠️ 需要提供提示词")
+                    return
                 # 检查webui可用性
                 if not (await self._check_webui_available())[0]:
                     yield event.plain_result("⚠️ 同webui无连接，目前无法生成图片！")
