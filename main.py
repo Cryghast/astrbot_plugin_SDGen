@@ -470,6 +470,11 @@ class SDGenerator(Star):
         ):
             yield result
 
+    @sd.command("i2i")  # 图生图占位指令：功能开发中，仅回复提示，不触发其他变化 #由DS harness生成
+    async def i2i_placeholder(self, event: AstrMessageEvent):
+        """图生图占位指令：当前仅回复"此功能正在开发中"，后续将替换为完整实现"""  #由DS harness生成
+        yield event.plain_result("此功能正在开发中")  #由DS harness生成
+
     @sd.command("verbose")  # 切换详细输出模式
     async def set_verbose(self, event: AstrMessageEvent):
         """切换详细输出模式（verbose）"""
