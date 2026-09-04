@@ -259,17 +259,20 @@ class SDGenerator(Star):
 
     async def _set_model(self, model_name: str) -> bool:
         """设置图像生成模型，并存入 config"""
-        # [修复] 原实现直接调用 self.session.post()，但漏掉了 ensure_session()：#由DS harness生成
-        # 若 /sd model set 是插件启动后的第一条指令，self.session 仍为 None，切换必然失败。#由DS harness生成
-        # 现改为复用通用 API 层 _call_sd_api()：其内部已完成会话初始化、状态码检查与连接异常包装，#由DS harness生成
-        # 行为与原实现等价（非200时抛ConnectionError被下方except捕获），并消除重复代码。#由DS harness生成
         try:
-            await self._call_sd_api("/sdapi/v1/options", {"sd_model_checkpoint": model_name})  # 复用通用API层，内部已ensure_session() #由DS harness生成
-            self.config["base_model"] = model_name  # 存入 config
-            self.config.save_config()
+            async with self.session.post(
+                    f"{self.config['webui_url']}/sdapi/v1/options",
+                    json={"sd_model_checkpoint": model_name}
+            ) as resp:
+                if resp.status == 200:
+                    self.config["base_model"] = model_name  # 存入 config
+                    self.config.save_config()
 
-            logger.debug(f"模型已设置为: {model_name}")
-            return True
+                    logger.debug(f"模型已设置为: {model_name}")
+                    return True
+                else:
+                    logger.error(f"设置模型失败 (状态码: {resp.status})")
+                    return False
         except Exception as e:
             logger.error(f"设置模型异常: {e}")
             return False
