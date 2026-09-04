@@ -209,18 +209,13 @@ class SDGenerator(Star):
 
         return ""
 
-    async def _call_sd_api(self, endpoint: str, payload: dict, total_timeout: int = None) -> dict:
+    async def _call_sd_api(self, endpoint: str, payload: dict) -> dict:
         """通用API调用函数"""
         await self.ensure_session()
-        # [新增] 支持为单个慢操作（如切换模型）单独放宽总超时，不影响会话默认超时。#由DS harness生成
-        request_kwargs = {}
-        if total_timeout is not None:
-            request_kwargs["timeout"] = aiohttp.ClientTimeout(total=total_timeout)  #由DS harness生成
         try:
             async with self.session.post(
                     f"{self.config['webui_url']}{endpoint}",
-                    json=payload,
-                    **request_kwargs  #由DS harness生成
+                    json=payload
             ) as resp:
                 if resp.status != 200:
                     error = await resp.text()
@@ -228,19 +223,6 @@ class SDGenerator(Star):
                 return await resp.json()
         except aiohttp.ClientError as e:
             raise ConnectionError(f"连接失败: {str(e)}")
-
-    async def _get_webui_options(self) -> dict:
-        # [新增] 读取 WebUI 当前全部选项，用于切换模型后向服务端确认 sd_model_checkpoint 状态。#由DS harness生成
-        """获取 WebUI 当前选项字典（GET /sdapi/v1/options）"""
-        await self.ensure_session()
-        try:
-            async with self.session.get(f"{self.config['webui_url']}/sdapi/v1/options") as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                logger.error(f"读取WebUI选项失败 (状态码: {resp.status})")
-        except Exception as e:
-            logger.error(f"读取WebUI选项异常: {e}")
-        return {}
 
     async def _call_t2i_api(self, prompt: str) -> dict:
         """调用 Stable Diffusion 文生图 API"""
@@ -277,42 +259,20 @@ class SDGenerator(Star):
 
     async def _set_model(self, model_name: str) -> bool:
         """设置图像生成模型，并存入 config"""
-        # [修复v1] 原实现直接调用 self.session.post()，但漏掉了 ensure_session()：#由DS harness生成
+        # [修复] 原实现直接调用 self.session.post()，但漏掉了 ensure_session()：#由DS harness生成
         # 若 /sd model set 是插件启动后的第一条指令，self.session 仍为 None，切换必然失败。#由DS harness生成
-        # [修复v2] 切换大模型时 WebUI 会同步卸载旧模型并加载新权重（显存释放+权重搬运等），#由DS harness生成
-        # 耗时可能超过会话默认超时(120s)：客户端先到期断开，服务端加载完成后回送响应失败#由DS harness生成
-        # （WebUI日志出现 h11 LocalProtocolError），但模型实际已切换成功。对策：#由DS harness生成
-        # ① 本次POST单独放宽超时至600s；② 若仍未正常返回，轮询 GET /sdapi/v1/options #由DS harness生成
-        # 向服务端确认 sd_model_checkpoint 是否已是目标模型——是则判定切换成功。#由DS harness生成
-        confirmed = False
+        # 现改为复用通用 API 层 _call_sd_api()：其内部已完成会话初始化、状态码检查与连接异常包装，#由DS harness生成
+        # 行为与原实现等价（非200时抛ConnectionError被下方except捕获），并消除重复代码。#由DS harness生成
         try:
-            await self._call_sd_api(
-                "/sdapi/v1/options",
-                {"sd_model_checkpoint": model_name},
-                total_timeout=600,  # 切换模型专属超时：覆盖大权重完整加载耗时 #由DS harness生成
-            )
-            confirmed = True
-        except Exception as e:
-            logger.warning(f"设置模型请求未正常返回，转为服务端状态确认: {e}")
-
-        if not confirmed:
-            # 轮询确认（最多约60s）：覆盖"客户端已断开但服务端已完成/正在完成切换"的情况 #由DS harness生成
-            for _ in range(12):
-                options = await self._get_webui_options()
-                if options.get("sd_model_checkpoint") == model_name:
-                    confirmed = True
-                    logger.debug(f"模型切换：POST未正常返回，但服务端已确认当前模型为 {model_name}")  #由DS harness生成
-                    break
-                await asyncio.sleep(5)
-
-        if confirmed:
+            await self._call_sd_api("/sdapi/v1/options", {"sd_model_checkpoint": model_name})  # 复用通用API层，内部已ensure_session() #由DS harness生成
             self.config["base_model"] = model_name  # 存入 config
             self.config.save_config()
+
             logger.debug(f"模型已设置为: {model_name}")
             return True
-
-        logger.error(f"设置模型失败：服务端未确认切换到 {model_name}")
-        return False
+        except Exception as e:
+            logger.error(f"设置模型异常: {e}")
+            return False
 
     async def _check_webui_available(self) -> (bool, str):
         """服务状态检查"""
@@ -852,9 +812,6 @@ class SDGenerator(Star):
 
                 selected_model = models[index]
                 logger.debug(f"selected_model: {selected_model}")
-                # [新增] 切换大模型可能需要较长时间，先提示用户避免误以为指令卡死。#由DS harness生成
-                if self.config.get("verbose", True):
-                    yield event.plain_result("⏳ 正在切换模型，大模型加载可能需要1-2分钟，请稍候...")  #由DS harness生成
                 if await self._set_model(selected_model):
                     yield event.plain_result(f"✅ 模型已切换为: {selected_model}")
                 else:
