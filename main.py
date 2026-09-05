@@ -6,6 +6,11 @@ import aiohttp
 
 from astrbot.api.all import *
 
+try:  #由DS harness生成
+    from astrbot.core.message.components import Reply  # 引用消息组件：用于从引用中取图（新版AstrBot提供）#由DS harness生成
+except ImportError:  #由DS harness生成
+    Reply = None  # 旧版无此组件时，_is_reply_segment退化为类型字符串匹配 #由DS harness生成
+
 
 TEMP_PATH = os.path.abspath("data/temp")
 
@@ -148,7 +153,7 @@ class SDGenerator(Star):
         return prompt
 
     @staticmethod
-    def _extract_prompt_from_message(event: AstrMessageEvent, raw_prompt: str) -> str:
+    def _extract_prompt_from_message(event: AstrMessageEvent, raw_prompt: str, subcommand: str = "gen") -> str:
         """从原始消息还原提示词，避免参数解析截断空格"""
         full = (event.message_str or "").strip()
         base = (raw_prompt or "").strip()
@@ -159,7 +164,8 @@ class SDGenerator(Star):
         tokens = full.split()
         if tokens and tokens[0].lstrip("/") in ("sd",):
             tokens = tokens[1:]
-        if tokens and tokens[0] == "gen":
+        # [修改] 子命令名参数化：默认"gen"保持原有行为不变，i2i传入"i2i"复用同一还原逻辑 #由DS harness生成
+        if tokens and tokens[0] == subcommand:
             tokens = tokens[1:]
 
         fallback = " ".join(tokens).strip()
@@ -470,10 +476,66 @@ class SDGenerator(Star):
         ):
             yield result
 
-    @sd.command("i2i")  # 图生图占位指令：功能开发中，仅回复提示，不触发其他变化 #由DS harness生成
-    async def i2i_placeholder(self, event: AstrMessageEvent):
-        """图生图占位指令：当前仅回复"此功能正在开发中"，后续将替换为完整实现"""  #由DS harness生成
-        yield event.plain_result("此功能正在开发中")  #由DS harness生成
+    @staticmethod
+    def _is_reply_segment(seg) -> bool:
+        """识别引用消息段：优先 isinstance(Reply)，旧版 AstrBot 无此类时按类型值匹配。#由DS harness生成"""
+        if Reply is not None:
+            return isinstance(seg, Reply)
+        t = str(getattr(seg, "type", "")).lower()
+        return t == "reply" or t.endswith("componenttype.reply")
+
+    def _find_i2i_image(self, event: AstrMessageEvent):
+        """[i2i] 定位输入图片。优先级：引用消息中的图 > 当前消息直接附带的图（宽容降级）。#由DS harness生成
+        返回 (Image组件或None, 来源/原因描述)。"""
+        # [新增] getattr兜底：AstrBot版本差异导致属性路径不同时优雅降级为"未找到图片"而非崩溃 #由DS harness生成
+        segments = getattr(getattr(event, "message_obj", None), "message", None) or []
+        reply_seg = None
+        first_direct = None
+        for seg in segments:                        # 一趟扫描收集两类候选 #由DS harness生成
+            if self._is_reply_segment(seg) and reply_seg is None:
+                reply_seg = seg                     # AstrBot已自动get_msg，chain里是原消息完整段列表
+            elif isinstance(seg, Image) and first_direct is None:
+                first_direct = seg                  # 当前消息直接附带的图
+
+        if reply_seg is not None:                   # —— 引用分支：宽容降级链 —— #由DS harness生成
+            chain = getattr(reply_seg, "chain", None) or []
+            for sub in chain:                       # 1. 引用里的第一张图（多图取首张）
+                if isinstance(sub, Image):
+                    return sub, "引用消息中的图片"
+            if not chain:                           # 2. chain为空 = get_msg失败（原消息太旧/被撤回）
+                if first_direct is not None:
+                    return first_direct, "随消息发送的图片（引用内容获取失败，已改用直发图）"
+                return None, "无法获取引用的消息内容，请重新引用最近的图片"
+            if first_direct is not None:            # 3. 引用里没图 → 降级用直发图
+                return first_direct, "随消息发送的图片（引用中未找到图片，已改用直发图）"
+            return None, "引用的消息里没有图片，请引用图片或把图片和指令一起发送"
+
+        if first_direct is not None:                # —— 无引用分支：用直发图 —— #由DS harness生成
+            return first_direct, "随消息发送的图片"
+        return None, "未找到图片，请引用一张图片，或将图片与指令一起发送"
+
+    @sd.command("i2i")  # i2i：V1测试期——仅验证"引用→取图"链路，不调用SD WebUI #由DS harness生成
+    async def i2i(self, event: AstrMessageEvent, prompt: str):
+        """[V1测试期] 从引用/直发消息中取出输入图片并回显确认（提示词仅回显验证，暂不使用）"""  #由DS harness生成
+        full_prompt = self._extract_prompt_from_message(event, prompt, subcommand="i2i")  # 还原多词提示词，与/sd gen同机制 #由DS harness生成
+        img, source_desc = self._find_i2i_image(event)
+        if img is None:
+            yield event.plain_result(f"⚠️ {source_desc}")
+            return
+        try:
+            b64 = await img.convert_to_base64()     # AstrBot内置：自动处理本地文件/URL下载 #由DS harness生成
+        except Exception as e:                      # 防御：临时文件被清理、CDN下载失败等
+            logger.error(f"[i2i测试] 图片转base64失败: {e}")
+            yield event.plain_result("❌ 图片内容获取失败，原消息可能过旧或图片已失效，请重试")
+            return
+        size_kb = len(b64) * 3 / 4 / 1024           # base64长度反推二进制大小（约值）#由DS harness生成
+        yield event.plain_result(
+            f"✅ [i2i测试期] 成功获取输入图片（{source_desc}）\n"
+            f"- 图片大小：约 {size_kb:.0f} KB\n"
+            f"- 收到提示词：{full_prompt if full_prompt else '（无）'}\n"
+            "取图链路验证通过，下方回显原图供核对（测试期行为，正式版移除）："
+        )
+        yield event.chain_result(Image.fromBase64(b64))  # 回显确认；Image.fromBase64插件t2i输出已在用 #由DS harness生成
 
     @sd.command("verbose")  # 切换详细输出模式
     async def set_verbose(self, event: AstrMessageEvent):
