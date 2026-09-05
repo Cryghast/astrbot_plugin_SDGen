@@ -535,7 +535,7 @@ class SDGenerator(Star):
             f"- 收到提示词：{full_prompt if full_prompt else '（无）'}\n"
             "取图链路验证通过，下方回显原图供核对（测试期行为，正式版移除）："
         )
-        yield event.chain_result(Image.fromBase64(b64))  # 回显确认；Image.fromBase64插件t2i输出已在用 #由DS harness生成
+        yield event.chain_result([Image.fromBase64(b64)])  # 回显确认：必须传组件列表（与t2i输出口径一致，v4.27.4管线对chain执行len()）#由DS harness生成
 
     @sd.command("verbose")  # 切换详细输出模式
     async def set_verbose(self, event: AstrMessageEvent):
